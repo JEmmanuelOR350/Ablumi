@@ -1,0 +1,10 @@
+gTTS==2.5.1
+keras
+mediapipe
+numpy
+opencv_contrib_python
+pandas
+pygame
+tensorflow
+tkinter
+pygame==2.5.2
