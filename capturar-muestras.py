@@ -1,116 +1,182 @@
 import os
-import json
 import cv2
+import json
+import threading
 import tkinter as tk
 from tkinter import messagebox
 import mediapipe as mp
 
-# Paths
-JSON_PATH = './hand_data.json'
-dataset_size = 100
-
-# MediaPipe
 mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
+mp_draw = mp.solutions.drawing_utils
 
-# Load existing data
-if os.path.exists(JSON_PATH):
-    with open(JSON_PATH, 'r') as f:
-        all_data = json.load(f)
-else:
-    all_data = []
+DATASET_SIZE = 100
+JSON_FILE = "hand_data.json"
 
-def extract_hand_keypoints(results):
-    points = []
-    for hand_landmarks in results.multi_hand_landmarks or []:
-        for lm in hand_landmarks.landmark:
-            points.append([lm.x, lm.y])
-    return points
+capturing = False
+frame_count = 0
+current_class = ""
+current_label = ""
 
-def save_data_to_json(class_name, label, data):
-    global all_data
-    # Remove existing class if user confirmed overwrite
-    all_data = [entry for entry in all_data if entry["class"] != class_name]
-    all_data.append({
-        "class": class_name,
-        "label": label,
-        "xy_points": data
-    })
-    with open(JSON_PATH, 'w') as f:
-        json.dump(all_data, f, indent=2)
+# Variables para compartir frames y resultados
+current_frame = None
+current_results = None
 
-def capture_hand_data(class_name, label):
+def video_loop():
+    global current_frame, current_results, capturing, frame_count, current_class, current_label
+
+    hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
     cap = cv2.VideoCapture(0)
-    collected_data = []
 
-    counter = 0
-    while counter < dataset_size:
-        ret, frame = cap.read()
+    while True:
+        ret, img = cap.read()
         if not ret:
             continue
 
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(image_rgb)
+        img = cv2.flip(img, 1)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = hands.process(img_rgb)
+        current_results = results
+        current_frame = img.copy()
 
-        # Visual feedback
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                mp.solutions.drawing_utils.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                mp_draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-        # Extract points
-        hand_points = extract_hand_keypoints(results)
-        if hand_points:
-            collected_data.extend(hand_points)
-            counter += 1
+        if capturing and frame_count < DATASET_SIZE:
+            # Extraer puntos
+            left_points = []
+            right_points = []
 
-        cv2.putText(frame, f"Capturando: {counter}/{dataset_size}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.imshow("Detección de Manos", frame)
+            if results.multi_handedness:
+                for idx, hand_handedness in enumerate(results.multi_handedness):
+                    hand_label = hand_handedness.classification[0].label
+                    hand_landmarks = results.multi_hand_landmarks[idx]
+                    points = [[lm.x, lm.y] for lm in hand_landmarks.landmark]
 
-        if cv2.waitKey(10) & 0xFF == ord('q'):
+                    if hand_label == 'Left':
+                        left_points = points
+                    elif hand_label == 'Right':
+                        right_points = points
+
+            if not left_points:
+                left_points = [[0, 0]] * 21
+            if not right_points:
+                right_points = [[0, 0]] * 21
+
+            # Cargar JSON seguro
+            if os.path.exists(JSON_FILE):
+                try:
+                    with open(JSON_FILE, 'r') as f:
+                        data = json.load(f)
+                except json.JSONDecodeError:
+                    data = []
+            else:
+                data = []
+
+            # Buscar o crear entrada
+            existing_entry = None
+            for entry in data:
+                if entry["class"] == current_class and entry["label"] == current_label:
+                    existing_entry = entry
+                    break
+
+            if not existing_entry:
+                new_entry = {
+                    "class": current_class,
+                    "label": current_label,
+                    "left_points": {},
+                    "right_points": {}
+                }
+                data.append(new_entry)
+                existing_entry = new_entry
+
+            frame_key = f"frame{frame_count}"
+            existing_entry["left_points"][frame_key] = left_points
+            existing_entry["right_points"][frame_key] = right_points
+
+            with open(JSON_FILE, 'w') as f:
+                json.dump(data, f, indent=4)
+
+            frame_count += 1
+
+            cv2.putText(img, f"Capturando {frame_count}/{DATASET_SIZE}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
+            if frame_count >= DATASET_SIZE:
+                capturing = False
+                messagebox.showinfo("Completado", f"Captura completada para clase '{current_class}' y label '{current_label}'")
+
+        cv2.imshow("Ventana Cámara - Presiona ESC para salir", img)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC
+            capturing = False
             break
 
     cap.release()
     cv2.destroyAllWindows()
+    # Si cierras la cámara, también cierra la app:
+    root.quit()
 
-    save_data_to_json(class_name, label, collected_data)
-    messagebox.showinfo("Completado", f"Captura completada para la clase: {label}")
+def start_capture():
+    global capturing, current_class, current_label, frame_count
+    cls = entry_class.get().strip()
+    lbl = entry_label.get().strip()
 
-def on_start():
-    class_name = entry_class.get().strip()
-    label = entry_label.get().strip()
-
-    if not class_name or not label:
-        messagebox.showerror("Error", "Debes ingresar la clase y su etiqueta.")
+    if not cls or not lbl:
+        messagebox.showerror("Error", "Debes ingresar clase y label.")
         return
 
-    exists = any(entry['class'] == class_name for entry in all_data)
-    if exists:
-        confirm = messagebox.askyesno("Confirmar", f"La clase '{class_name}' ya existe. ¿Deseas reemplazarla?")
-        if not confirm:
-            return
+    # Cargar JSON y buscar si la clase+label existe
+    data = []
+    if os.path.exists(JSON_FILE):
+        try:
+            with open(JSON_FILE, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            data = []
 
-    capture_hand_data(class_name, label)
+    for entry in data:
+        if entry["class"] == cls and entry["label"] == lbl:
+            # Preguntar si reemplazar
+            if not messagebox.askyesno("Confirmar", f"La clase '{cls}' con label '{lbl}' ya existe. ¿Deseas reemplazar los datos?"):
+                return
+            else:
+                data.remove(entry)
+                with open(JSON_FILE, 'w') as f:
+                    json.dump(data, f, indent=4)
+                break
 
-def on_cancel():
+    current_class = cls
+    current_label = lbl
+    frame_count = 0
+    capturing = True
+
+def on_close():
+    global capturing
+    capturing = False
     root.destroy()
 
-# GUI
-root = tk.Tk()
-root.title("Capturador de Datos de Manos")
+# --- GUI ---
 
-tk.Label(root, text="Nombre de clase (ej: hola):").pack(pady=5)
+root = tk.Tk()
+root.title("Capturador de Lenguaje de Señas")
+
+tk.Label(root, text="Nombre de la clase:").pack(pady=5)
 entry_class = tk.Entry(root, width=30)
 entry_class.pack(pady=5)
 
-tk.Label(root, text="Etiqueta a mostrar (ej: HOLA):").pack(pady=5)
+tk.Label(root, text="Label:").pack(pady=5)
 entry_label = tk.Entry(root, width=30)
 entry_label.pack(pady=5)
 
-btn_start = tk.Button(root, text="Iniciar grabación", command=on_start)
+btn_start = tk.Button(root, text="Iniciar Captura", command=start_capture)
 btn_start.pack(pady=10)
 
-btn_cancel = tk.Button(root, text="Cancelar", command=on_cancel)
-btn_cancel.pack(pady=5)
+btn_exit = tk.Button(root, text="Salir", command=on_close)
+btn_exit.pack(pady=5)
+
+root.protocol("WM_DELETE_WINDOW", on_close)
+
+# Lanzar hilo de cámara desde el inicio
+threading.Thread(target=video_loop, daemon=True).start()
 
 root.mainloop()
